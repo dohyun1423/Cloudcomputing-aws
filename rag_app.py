@@ -4,9 +4,7 @@ import os
 from dotenv import load_dotenv
 from strands import Agent, tool
 
-# =========================
-# ENV 로드
-# =========================
+
 load_dotenv()
 
 BEDROCK_REGION = os.getenv("AWS_REGION")
