@@ -109,52 +109,23 @@ def search_knowledge_base(query: str) -> str:
 # ===================================================================
 @st.cache_resource
 def get_agents():
-    query_prompt = """검색어 최적화 도구. 질문에서 핵심 검색어만 추출."""
+    query_prompt = """핵심 검색어만 추출."""
 
-    drafter_prompt = """시험 문제 출제자. search_knowledge_base 도구로 문서를 찾아 간결한 문제 초안 작성."""
+    drafter_prompt = """문제 출제자. search_knowledge_base로 문서를 검색하여 요청받은 문제 유형에 맞춰 JSON 생성.
 
-    editor_prompt = """문제 편집자. 초안을 JSON으로 변환.
+**중요: 반드시 요청받은 문제 유형(단답형/객관식/OX)으로만 생성할 것**
 
-규칙:
-1. 100% 한국어
-2. 객관식: 보기 4개(A,B,C,D), answer는 "A"/"B"/"C"/"D" 중 하나
-3. OX: 보기 2개(A:O, B:X), answer는 "A" 또는 "B"
-4. 단답형: 
-   - options는 반드시 빈 객체 {}
-   - answer는 A/B/C/D가 아닌 실제 정답 키워드 (예: "Amazon S3", "VPC", "로드밸런서")
-   - explanation의 wrong는 빈 객체 {}
-5. JSON만 출력, 다른 텍스트 금지
+단답형 형식 (예: "~는 무엇입니까?" "~를 쓰시오"):
+{"questions":[{"number":1,"question":"AWS에서 사용자 인증을 관리하는 서비스는?","options":{},"answer":"IAM","explanation":{"correct":"IAM은 Identity and Access Management의 약자입니다.","wrong":{}},"related_concepts":["IAM","인증"]}]}
 
-단답형 예시:
-{
-    "questions": [{
-        "number": 1,
-        "question": "AWS의 객체 스토리지 서비스 이름은?",
-        "options": {},
-        "answer": "Amazon S3",
-        "explanation": {
-            "correct": "Amazon S3는 AWS의 대표적인 객체 스토리지 서비스입니다.",
-            "wrong": {}
-        },
-        "related_concepts": ["S3", "객체 스토리지"]
-    }]
-}
+객관식 형식 (선택지 4개):
+{"questions":[{"number":1,"question":"질문","options":{"A":"보기1","B":"보기2","C":"보기3","D":"보기4"},"answer":"A","explanation":{"correct":"정답 해설","wrong":{"A":"A 해설","B":"B 해설","C":"C 해설","D":"D 해설"}},"related_concepts":["개념"]}]}
 
-객관식 예시:
-{
-    "questions": [{
-        "number": 1,
-        "question": "문제",
-        "options": {"A":"보기1", "B":"보기2", "C":"보기3", "D":"보기4"},
-        "answer": "A",
-        "explanation": {
-            "correct": "해설",
-            "wrong": {"A":"A해설", "B":"B해설", "C":"C해설", "D":"D해설"}
-        },
-        "related_concepts": ["개념1"]
-    }]
-}
+OX 형식 (참/거짓 판단):
+{"questions":[{"number":1,"question":"EC2는 서버리스 서비스이다.","options":{"A":"O","B":"X"},"answer":"B","explanation":{"correct":"EC2는 가상 서버 서비스로 서버리스가 아닙니다.","wrong":{"A":"","B":""}},"related_concepts":["EC2"]}]}
 """
+
+    editor_prompt = """JSON만 출력. 다른 텍스트 금지."""
 
     query_agent = Agent(
         model="us.amazon.nova-lite-v1:0", 
@@ -291,24 +262,56 @@ def rag_answer_chain(question: str, messages: list, num_questions: int = 1, diff
         "단답형": "1~3단어 이내의 짧은 키워드로 답하는 문제. options는 빈 객체 {}, answer는 실제 정답 단어"
     }
 
-    optimized = str(query_agent(question, max_tokens=1000))
-    
-    enhanced_prompt = f"""
-    주제: {optimized}
-    문제 개수: {num_questions}개
-    난이도: {difficulty} - {difficulty_guide[difficulty]}
-    문제 유형: {question_type} - {type_guide[question_type]}
-    
-    중요: {question_type} 유형에 맞게 정확히 생성하세요!
-    """
-    
-    draft = drafter(enhanced_prompt, max_tokens=2000)
-    
-    # max_tokens를 충분히 크게 설정
-    required_tokens = 2000 + (num_questions * 800)
-    final_raw = editor(str(draft), max_tokens=required_tokens)
+    try:
+        optimized = str(query_agent(question, max_tokens=1000))
+        
+        enhanced_prompt = f"""주제: {optimized}
+문제 개수: {num_questions}개
+난이도: {difficulty}
+문제 유형: {question_type}
 
-    txt = normalize_references(remove_markdown_headers(str(final_raw)))
+**매우 중요: 반드시 '{question_type}' 형식으로만 문제를 생성하세요!**
+
+{question_type} 규칙:
+- 단답형: options는 빈 객체 {{}}, answer는 정답 키워드 (예: "IAM", "Amazon S3")
+- 객관식: options는 {{"A":"","B":"","C":"","D":""}}, answer는 A/B/C/D 중 하나
+- OX: options는 {{"A":"O","B":"X"}}, answer는 A 또는 B
+
+JSON만 출력하세요."""
+        
+        # drafter에서 바로 JSON 형식으로 생성
+        draft = drafter(enhanced_prompt, max_tokens=6000)
+        
+        txt = normalize_references(remove_markdown_headers(str(draft)))
+    
+    except Exception as e:
+        # 토큰 제한 또는 기타 에러 발생 시
+        import traceback
+        error_msg = str(e)
+        print(f"Error in rag_answer_chain: {error_msg}")
+        traceback.print_exc()
+        
+        # 에러 문제 생성
+        import time
+        unique_id = int(time.time() * 1000)
+        js = {
+            "questions": [{
+                "number": f"{unique_id}_1",
+                "display_number": 1,
+                "question": f"문제 생성 중 오류가 발생했습니다. 문제 개수를 줄이거나 다시 시도해주세요.",
+                "options": {} if question_type == "단답형" else {"A": "재시도 필요", "B": "-", "C": "-", "D": "-"},
+                "answer": "재시도" if question_type == "단답형" else "A",
+                "difficulty": difficulty,
+                "topic": question,
+                "type": question_type,
+                "explanation": {
+                    "correct": f"에러 메시지: {error_msg[:200]}",
+                    "wrong": {} if question_type == "단답형" else {"A": "-", "B": "-", "C": "-", "D": "-"}
+                },
+                "related_concepts": []
+            }]
+        }
+        return js, ctx.docs
 
     js = extract_json(txt)
     
@@ -330,13 +333,24 @@ def rag_answer_chain(question: str, messages: list, num_questions: int = 1, diff
             if "related_concepts" not in q:
                 q["related_concepts"] = []
             
-            # 단답형 검증 및 수정
+            # 문제 유형 검증 및 강제 수정
+            current_options = q.get("options", {})
+            
+            # 단답형이어야 하는데 다른 형식으로 생성된 경우
             if question_type == "단답형":
-                if "options" not in q or q["options"]:
+                if current_options and len(current_options) > 0:
+                    # options가 있으면 단답형이 아니므로 수정
+                    print(f"⚠️ 경고: 단답형을 요청했으나 {len(current_options)}개의 선택지가 생성됨. 강제 수정합니다.")
+                    q["options"] = {}
+                    # answer가 A/B/C/D이면 "정답 미생성"으로 변경
+                    if q.get("answer", "").upper() in ["A", "B", "C", "D", "O", "X"]:
+                        q["answer"] = "정답 미생성 - 다시 생성 필요"
+                else:
+                    # 정상적인 단답형
                     q["options"] = {}
                 
                 # answer가 A/B/C/D면 오류로 처리
-                if q.get("answer", "").upper() in ["A", "B", "C", "D"]:
+                if q.get("answer", "").upper() in ["A", "B", "C", "D", "O", "X"]:
                     q["answer"] = "정답 생성 오류"
                 
                 # wrong explanation은 빈 객체로
@@ -345,13 +359,33 @@ def rag_answer_chain(question: str, messages: list, num_questions: int = 1, diff
                 else:
                     q["explanation"]["wrong"] = {}
             
-            # 객관식/OX 검증
-            else:
-                if "options" not in q or not q["options"]:
-                    q["options"] = {"A": "-", "B": "-", "C": "-", "D": "-"}
+            # OX 문제여야 하는데 다른 형식인 경우
+            elif question_type == "OX":
+                if len(current_options) != 2 or "A" not in current_options or "B" not in current_options:
+                    print(f"⚠️ 경고: OX를 요청했으나 다른 형식으로 생성됨. 강제 수정합니다.")
+                    q["options"] = {"A": "O", "B": "X"}
+                    # answer가 O/X이면 A/B로 변환
+                    if q.get("answer", "").upper() == "O":
+                        q["answer"] = "A"
+                    elif q.get("answer", "").upper() == "X":
+                        q["answer"] = "B"
+                    elif q.get("answer", "").upper() not in ["A", "B"]:
+                        q["answer"] = "A"
                 
                 if "explanation" not in q:
                     q["explanation"] = {"correct": "", "wrong": {}}
+            
+            # 객관식이어야 하는 경우
+            else:  # 객관식
+                if len(current_options) != 4 or not all(k in current_options for k in ["A", "B", "C", "D"]):
+                    print(f"⚠️ 경고: 객관식을 요청했으나 다른 형식으로 생성됨. 강제 수정합니다.")
+                    q["options"] = {"A": "-", "B": "-", "C": "-", "D": "-"}
+                    if q.get("answer", "").upper() not in ["A", "B", "C", "D"]:
+                        q["answer"] = "A"
+                
+                if "explanation" not in q:
+                    q["explanation"] = {"correct": "", "wrong": {}}
+
 
     return js, ctx.docs
 
